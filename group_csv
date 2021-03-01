@@ -1,0 +1,131 @@
+#!/usr/bin/env ruby
+
+require "active_support/core_ext/object"
+require "byebug"
+
+load "command_line.rb"
+load "matcher.rb"
+load "engine.rb"
+
+USAGE = <<~ENDUSAGE.freeze
+  Usage: group_csv <file_name> <matcher_type> [field:[type]] [field:[type]]...
+    e.g. group_csv myfile.csv phone
+    e.g. group_csv myfile.csv email
+    e.g. group_csv myfile.csv email_or_phone
+    e.g. group_csv myfile.csv email email1 email2
+    e.g. group_csv myfile.csv email_or_phone email1:email email2:email phone1:phone phone2:phone
+  [type] value is ignored if matching on single type (e.g. phone)
+ENDUSAGE
+
+# --------------
+# Helper methods
+# --------------
+
+def validate_matcher_type!(type)
+  unless Matcher.valid_matcher_type? type
+    exit_fail! do
+      err "Invalid matcher_type: #{type}"
+      err "Valid types: #{Matcher::VALID_MATCHER_TYPES.join(", ")}"
+    end
+  end
+end
+
+
+# -------------
+# Begin program
+# -------------
+
+# Pull the params out of the command line
+file_name, matcher_type = ARGV
+fields = ARGV[2..] # This is all the rest of the params
+
+# Check inputs
+matcher_type = Matcher.normalize_matcher_type matcher_type
+if matcher_type.blank?
+  exit_fail! do
+    err "Missing matcher_type"
+    err USAGE
+  end
+else
+  validate_matcher_type! matcher_type
+end
+
+if file_name.blank?
+  exit_fail! do
+    err "Missing file_name"
+    err USAGE
+  end
+else
+  unless File.exist? file_name
+    exit_fail! do
+      err "File does not exist: '#{file_name}'"
+    end
+  end
+end
+
+parsed_fields =
+  if fields.present?
+    fields.map {|f| f.split ":"}
+  else
+    nil
+  end
+
+# Set up the matcher
+matcher_hash =
+  if Matcher::MATCHER_TYPE_EMAIL_OR_PHONE == matcher_type
+    if parsed_fields.present?
+      parsed_fields.inject({}) do |memo, field_info|
+        name = field_info[0]
+        unless name.present?
+          # This should only happen in a case like this:
+          #   group_csv myfile.csv email_or_phone :phone
+          # (Notice the "missing" field name before the colon in ':phone')
+          exit_fail! do
+            err "Error parsing fields: #{fields}"
+            err USAGE
+          end
+        end
+
+        type = Matcher.normalize_matcher_type field_info[1]
+        validate_matcher_type! type # Remember! This exits if the validation fails.
+
+        memo[name] = type
+        memo
+      end
+    else
+      # Assume the email field is called email, and the phone field is called phone
+      {
+        Matcher::MATCHER_TYPE_EMAIL => Matcher::MATCHER_TYPE_EMAIL,
+        Matcher::MATCHER_TYPE_PHONE => Matcher::MATCHER_TYPE_PHONE
+      }
+    end
+  else
+    if parsed_fields.present?
+      parsed_fields.inject({}) do |memo, field_info|
+        name = field_info[0]
+
+        # We don't care if they tried to specify a type for a field
+        # when only matching against one type
+        memo[name] = matcher_type
+        memo
+      end
+    else
+      # Assume an email field is called email, and a phone field is called phone
+      { matcher_type => matcher_type }
+    end
+  end
+matcher = Matcher.new matcher_type, matcher_hash
+
+
+# Fire up the engine
+engine = Engine.new file_name, matcher
+outfile_name = engine.outfile_name
+puts "Writing to file: #{outfile_name}"
+engine.run!
+puts "Finished writing to file: #{outfile_name}"
+puts "#{engine.rows_processed} rows processed"
+
+
+# -----------
+# End program
+# -----------
